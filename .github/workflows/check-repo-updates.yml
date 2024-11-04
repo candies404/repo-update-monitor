@@ -1,0 +1,114 @@
+# 工作流名称
+name: 检查仓库更新
+
+# 触发条件
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 每天 UTC 0:00 运行（北京时间 8:00）
+  workflow_dispatch:      # 支持手动触发
+
+# 工作流任务
+jobs:
+  check-updates:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 步骤1: 调试环境变量，确认变量是否正确设置
+      - name: 调试环境变量
+        run: |
+          echo "Variables 内容:"
+          echo "REPOS: ${{ vars.REPOS }}"
+
+      # 步骤2: 检查仓库更新状态
+      - name: 检查仓库更新状态
+        id: check-updates
+        env:
+          REPOS: ${{ vars.REPOS }}  # 从GitHub Variables获取仓库列表
+        run: |
+            # 设置时区为上海
+            export TZ='Asia/Shanghai'
+            
+            # 将环境变量转换为数组（仓库列表应该以空格分隔，如：owner1/repo1 owner2/repo2）
+            read -ra repos <<< "$REPOS"
+            
+            # 初始化变量
+            updates_status="### 🔍 仓库更新检查报告\n\n"
+            updates_status+="### 📅 检查时间: $(date '+%Y-%m-%d %H:%M:%S')\n\n"
+            updates_status+="---\n\n"
+            has_updates=false
+            updated_repos=0
+            total_repos=${#repos[@]}
+            
+            # 遍历仓库列表
+            for repo in "${repos[@]}"; do
+              echo "处理仓库: ${repo}"
+              
+              # 调用GitHub API获取仓库信息
+              repo_info=$(curl -s "https://api.github.com/repos/${repo}")
+              latest_commit=$(curl -s "https://api.github.com/repos/${repo}/commits?per_page=1")
+              
+              # 解析API返回的JSON数据
+              commit_date=$(echo "$latest_commit" | jq -r '.[0].commit.committer.date')
+              commit_msg=$(echo "$latest_commit" | jq -r '.[0].commit.message')
+              description=$(echo "$repo_info" | jq -r '.description')
+              
+              # 计算时间差（小时）
+              current_time=$(date +"%Y-%m-%dT%H:%M:%SZ")
+              time_diff=$(( ( $(date -d "$current_time" +%s) - $(date -d "$commit_date" +%s) ) / 3600 ))
+              
+              # 判断是否有更新（24小时内）
+              if [ $time_diff -le 24 ]; then
+                has_updates=true
+                ((updated_repos++))
+                status_icon="✅"
+              else
+                status_icon="❌"
+              fi
+              
+              # 构建仓库更新信息
+              updates_status+="##### ${status_icon} 仓库：${repo}\n\n"
+              updates_status+="📝 **描述**：${description}\n\n"
+              updates_status+="⏰ **最后更新**：$(date -d "$commit_date" '+%Y-%m-%d %H:%M:%S')\n\n"
+              updates_status+="📌 **最新提交**：${commit_msg}\n\n"
+              updates_status+="⏳ **状态**：${time_diff}小时未更新\n\n"
+              updates_status+="---\n\n"
+            done
+            
+            # 设置通知标题
+            if [ "$has_updates" = true ]; then
+              title_status="🎉 发现${updated_repos}个仓库更新！- "
+            else
+              title_status="😴 暂无更新 - "
+            fi
+            
+            # 添加统计信息到开头
+            stats="### 📊 统计信息\n\n"
+            stats+="- 总仓库数：${total_repos}\n"
+            stats+="- 有更新：${updated_repos}\n"
+            stats+="- 无更新：$((total_repos - updated_repos))\n\n"
+            stats+="---\n\n"
+            
+            # 合并所有内容
+            final_status="${stats}${updates_status}"
+            
+            # 将结果保存到GitHub Actions输出变量
+            {
+              echo "has_updates=${has_updates}"
+              echo "check_results<<EOF"
+              echo -e "$final_status"
+              echo "EOF"
+              echo "title_prefix=${title_status}"
+            } >> $GITHUB_OUTPUT
+
+      # 步骤3: 发送通知
+      - name: 发送通知
+        if: github.event_name == 'workflow_dispatch' || steps.check-updates.outputs.has_updates == 'true'  # 手动触发或有更新时发送
+        uses: candies404/Multi-Channel-Notifier@latest
+        with:
+          title: "${{ steps.check-updates.outputs.title_prefix }}仓库更新检查报告"
+          content: ${{ steps.check-updates.outputs.check_results }}
+          wpush_key: ${{ secrets.wpush_key }}         # WxPusher 的 API key
+          dd_bot_secret: ${{ secrets.dd_bot_secret }} # 钉钉机器人加签密钥
+          dd_bot_token: ${{ secrets.dd_bot_token }}   # 钉钉机器人 token
+          dd_msg_type: 'markdown'                     # 钉钉消息类型
+          hitokoto: 'false'                          # 是否启用一言
